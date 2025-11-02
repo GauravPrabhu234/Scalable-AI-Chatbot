@@ -25,9 +25,17 @@ st.markdown("""
     .st-emotion-cache-1y4p8pa {
         padding-top: 2rem;
     }
-    /* You can add more specific chat message styling here if needed */
+
+    /* --- THIS IS THE NEW FIX --- */
+    /* This targets all chat messages and makes the text white */
+    [data-testid="chat-message-container"] div[data-testid="stMarkdown"] {
+        color: #FFFFFF; /* Makes text white */
+        font-weight: 600; /* Makes text a bit bolder */
+    }
+    
 </style>
 """, unsafe_allow_html=True)
+
 
 # --- Environment Variable and API Key Loading ---
 load_dotenv()

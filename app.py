@@ -48,9 +48,10 @@ embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 # --- Session State Initialization ---
 if 'store' not in st.session_state:
     st.session_state.store = {}
-if 'conversational_rag_chain' not in st.session_state:
-    st.session_state.conversational_rag_chain = None
+if 'db_ready' not in st.session_state:
+    st.session_state.db_ready = False
 
+# --- Sidebar for Controls ---
 # --- Sidebar for Controls ---
 with st.sidebar:
     st.header("Controls")
@@ -59,10 +60,8 @@ with st.sidebar:
     if st.button("Clear Chat History"):
         if session_id in st.session_state.store:
             st.session_state.store[session_id].clear()
-            st.session_state.conversational_rag_chain = None  #
-            st.success("Chat history cleared!")
-        else:
-            st.info("No active chat history to clear.")
+        st.session_state.db_ready = False  # Reset the database flag
+        st.success("Chat history and PDF context cleared!")
             
     uploaded_files = st.file_uploader("Upload your PDFs", type="pdf", accept_multiple_files=True)
 
@@ -76,10 +75,14 @@ if not groq_api_key:
     st.stop()
 
 # --- PDF Processing and RAG Chain Creation ---
-if uploaded_files and st.session_state.conversational_rag_chain is None:
+CHROMA_PATH = "./chroma_db" # Path to save the database
+
+# 1. Process PDFs and create DB only if files are uploaded and DB isn't ready
+if uploaded_files and not st.session_state.db_ready:
     with st.spinner("Processing PDFs... This may take a moment."):
         documents = []
         for uploaded_file in uploaded_files:
+            # Save files temporarily to load them
             temp_path = f"./{uploaded_file.name}"
             with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getvalue())
@@ -89,55 +92,70 @@ if uploaded_files and st.session_state.conversational_rag_chain is None:
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
         splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-        retriever = vectorstore.as_retriever()
+        
+        # Create and persist the database
+        vectorstore = Chroma.from_documents(documents=splits, 
+                                            embedding=embeddings, 
+                                            persist_directory=CHROMA_PATH)
+        
+        st.session_state.db_ready = True # Set the flag
+        st.success("PDFs processed successfully! You can now ask questions.")
 
-        llm = ChatGroq(groq_api_key=groq_api_key, model_name="llama-3.1-8b-instant")
+# 2. Build the RAG chain if the database is ready
+conversational_rag_chain = None
+if st.session_state.db_ready:
+    # Load the persisted database
+    vectorstore = Chroma(persist_directory=CHROMA_PATH, 
+                         embedding_function=embeddings)
+    retriever = vectorstore.as_retriever()
+    
+    llm = ChatGroq(groq_api_key=groq_api_key, model_name="llama-3.1-8b-instant")
 
-        # Contextualization prompt
-        contextualize_q_system_prompt = (
-            "Given a chat history and the latest user question "
-            "which might reference context in the chat history, "
-            "formulate a standalone question which can be understood "
-            "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed and otherwise return it as is."
-        )
-        contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system", contextualize_q_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-        history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+    # Contextualization prompt
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question "
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
+    )
+    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-        # Answering prompt
-        system_prompt = (
-            "You are an assistant for question-answering tasks. "
-            "Use the following pieces of retrieved context to answer the question. "
-            "If you don't know the answer, say that you don't know. "
-            "Use three sentences maximum and keep the answer concise.\n\n{context}"
-        )
-        qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-        question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    # Answering prompt
+    system_prompt = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer the question. "
+        "If you don't know the answer, say that you don't know. "
+        "Use three sentences maximum and keep the answer concise.\n\n{context}"
+    )
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-        def get_session_history(session: str) -> BaseChatMessageHistory:
-            if session not in st.session_state.store:
-                st.session_state.store[session] = ChatMessageHistory()
-            return st.session_state.store[session]
+    def get_session_history(session: str) -> BaseChatMessageHistory:
+        if session not in st.session_state.store:
+            st.session_state.store[session] = ChatMessageHistory()
+        return st.session_state.store[session]
 
-        st.session_state.conversational_rag_chain = RunnableWithMessageHistory(
-            rag_chain,
-            get_session_history,
-            input_messages_key="input",
-            history_messages_key="chat_history",
-            output_messages_key="answer",
-        )
-    st.success("PDFs processed successfully! You can now ask questions.")
+    conversational_rag_chain = RunnableWithMessageHistory(
+        rag_chain,
+        get_session_history,
+        input_messages_key="input",
+        history_messages_key="chat_history",
+        output_messages_key="answer",
+    )
 
+# --- Chat Interface Logic ---
+# Display chat messages from history
 # --- Chat Interface Logic ---
 # Display chat messages from history
 history = st.session_state.store.get(session_id, ChatMessageHistory())
@@ -150,11 +168,13 @@ if user_input := st.chat_input("Ask a question about your documents..."):
     with st.chat_message("human"):
         st.markdown(user_input)
 
-    if st.session_state.conversational_rag_chain is None:
+    # Use the locally defined chain
+    if conversational_rag_chain is None:
         st.warning("Please upload and process at least one PDF to begin.")
     else:
         with st.spinner("NBT Chatbot is thinking..."):
-            response = st.session_state.conversational_rag_chain.invoke(
+            # Use the locally defined chain
+            response = conversational_rag_chain.invoke(
                 {"input": user_input},
                 config={"configurable": {"session_id": session_id}},
             )

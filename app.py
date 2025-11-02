@@ -39,7 +39,7 @@ st.markdown("""
 
 # --- Environment Variable and API Key Loading ---
 load_dotenv()
-os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN")
+# os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN")
 groq_api_key = os.getenv("GROQ_API_KEY")
 
 # --- Embedding Model ---

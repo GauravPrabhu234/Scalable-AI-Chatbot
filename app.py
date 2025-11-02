@@ -59,6 +59,7 @@ with st.sidebar:
     if st.button("Clear Chat History"):
         if session_id in st.session_state.store:
             st.session_state.store[session_id].clear()
+            st.session_state.conversational_rag_chain = None  #
             st.success("Chat history cleared!")
         else:
             st.info("No active chat history to clear.")
@@ -75,7 +76,7 @@ if not groq_api_key:
     st.stop()
 
 # --- PDF Processing and RAG Chain Creation ---
-if uploaded_files:
+if uploaded_files and st.session_state.conversational_rag_chain is None:
     with st.spinner("Processing PDFs... This may take a moment."):
         documents = []
         for uploaded_file in uploaded_files:
